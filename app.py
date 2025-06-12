@@ -23,8 +23,11 @@ from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.metrics import mean_absolute_error, accuracy_score, classification_report
 import xgboost as xgb
 import warnings
+from flask_cors import CORS
 
 app = Flask(__name__)
+# ✅ Allow CORS for all domains and all routes
+CORS(app)
 
 # Global variables
 trained_model = None
