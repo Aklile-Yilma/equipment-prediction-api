@@ -150,7 +150,7 @@ class EnhancedEquipmentFailurePredictionModel:
             result = {
                 'equipment_id': features_df.iloc[i]['equipment_id'],
                 'days_to_failure': days,
-                'predicted_failure_date': pd.Timestamp.now() + pd.Timedelta(days=days),
+                'predicted_failure_date': pd.Timestamp.now(tz='UTC') + pd.Timedelta(days=days),
                 'failure_type': failure_types[i],
                 'confidence': max_proba[i],
                 'risk_level': 'High' if days < 30 else 'Medium' if days < 90 else 'Low',
@@ -169,6 +169,22 @@ class ProductionPredictor:
     
     def __init__(self, model):
         self.model = model
+
+    def safe_datetime_parse(self, date_str):
+        if not date_str:
+            return None
+        try:
+            dt = pd.to_datetime(date_str)
+            if dt.tz is None:
+                dt = dt.tz_localize('UTC')
+            else:
+                dt = dt.tz_convert('UTC')
+            return dt
+        except:
+            return None
+
+    def get_current_utc_time(self):
+        return pd.Timestamp.now(tz='UTC')
         
     def prepare_features(self, equipment_data):
         """Convert equipment JSON to model features"""
@@ -183,18 +199,16 @@ class ProductionPredictor:
             'current_status': equipment_data.get('status', 'Unknown')
         }
         
-        # Parse installation date
+        # Parse installation dat
+        current_time = self.get_current_utc_time()
         install_date_str = equipment_data.get('installationDate')
-        if install_date_str:
-            try:
-                install_date = pd.to_datetime(install_date_str)
-            except:
-                install_date = pd.Timestamp.now() - pd.Timedelta(days=365)
-        else:
-            install_date = pd.Timestamp.now() - pd.Timedelta(days=365)
-        
+        install_date = self.safe_datetime_parse(install_date_str)
+        if install_date is None:
+            install_date = current_time - pd.Timedelta(days=365)
+
+        age_timedelta = current_time - install_date
         # Calculate equipment characteristics
-        feature_row['age_days'] = (pd.Timestamp.now() - install_date).days
+        feature_row['age_days'] = age_timedelta.days
         feature_row['age_years'] = feature_row['age_days'] / 365.25
         
         if feature_row['age_days'] > 0:
@@ -209,10 +223,23 @@ class ProductionPredictor:
             maintenance_df = pd.DataFrame(maintenance_history)
             feature_row['total_maintenance_count'] = len(maintenance_history)
             
+            # if 'maintenanceDate' in maintenance_df.columns:
+            #     maintenance_dates = pd.to_datetime(maintenance_df['maintenanceDate'])
+            #     last_maintenance = maintenance_dates.max()
+            #     feature_row['days_since_last_maintenance'] = (pd.Timestamp.now(tz='UTC') - last_maintenance).days
+
             if 'maintenanceDate' in maintenance_df.columns:
-                maintenance_dates = pd.to_datetime(maintenance_df['maintenanceDate'])
-                last_maintenance = maintenance_dates.max()
-                feature_row['days_since_last_maintenance'] = (pd.Timestamp.now() - last_maintenance).days
+                maintenance_dates = []
+                for date_str in maintenance_df['maintenanceDate']:
+                    parsed_date = self.safe_datetime_parse(date_str)
+                    if parsed_date:
+                        maintenance_dates.append(parsed_date)
+                
+                if maintenance_dates:
+                    maintenance_dates = pd.Series(maintenance_dates)
+                    last_maintenance = maintenance_dates.max()
+                    days_since_last = (current_time - last_maintenance).days
+                    feature_row['days_since_last_maintenance'] = max(0, days_since_last)
                 
                 if len(maintenance_history) > 1:
                     intervals = maintenance_dates.sort_values().diff().dropna().dt.days
@@ -237,12 +264,16 @@ class ProductionPredictor:
                 feature_row['issue_diversity'] = 1
             
             # Recent maintenance count
-            recent_cutoff = pd.Timestamp.now() - pd.Timedelta(days=90)
+            recent_cutoff = current_time - pd.Timedelta(days=90)
+            recent_count = 0
+
             if 'maintenanceDate' in maintenance_df.columns:
-                recent_maintenance = maintenance_df[pd.to_datetime(maintenance_df['maintenanceDate']) > recent_cutoff]
-                feature_row['recent_maintenance_count'] = len(recent_maintenance)
-            else:
-                feature_row['recent_maintenance_count'] = 0
+                for date_str in maintenance_df['maintenanceDate']:
+                    parsed_date = self.safe_datetime_parse(date_str)
+                    if parsed_date and parsed_date > recent_cutoff:
+                        recent_count += 1
+
+            feature_row['recent_maintenance_count'] = recent_count
         else:
             # No maintenance history
             feature_row['total_maintenance_count'] = 0
@@ -534,6 +565,7 @@ def predict_batch():
             "message": str(e)
         }), 500
 
+
 # ================================================================================================
 # APPLICATION STARTUP
 # ================================================================================================
@@ -544,3 +576,4 @@ model_loaded = load_model()
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
